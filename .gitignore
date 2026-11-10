@@ -1,0 +1,70 @@
+# ==============================================================================
+# HỆ THỐNG ĐẨY CỔNG KHÁM SỨC KHỎE QUỐC GIA (KSK PORTAL GATEWAY)
+# GIT IGNORE
+# ==============================================================================
+
+# Environment & Secrets (Không commit file chứa mật khẩu thực tế)
+.env
+*.env
+**/.env
+!.env.example
+!**/.env.example
+
+# Dependencies
+node_modules
+node_modules/
+**/node_modules
+**/node_modules/
+
+# Build & Release outputs
+client/dist/
+dist/
+dist-*/
+**/dist/
+**/dist-*/
+build/
+build-*/
+**/build/
+!client/build/
+!client/build/**
+release/
+**/release/
+.electron-predist
+.electron-predist/
+**/.electron-predist
+**/.electron-predist/
+*.exe
+*.blockmap
+builder-debug.yml
+
+# Python cache & virtualenv
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+venv/
+.venv/
+env/
+
+# Local databases & runtime data
+server/data/*.db
+server/data/*.db-journal
+server/data/*.db-wal
+server/data/*.db-shm
+server/data/*.bak
+server/data/*.sqlite
+server/data/*.sqlite3
+server/data/*.pem
+server/data/uploads/*
+
+# Scratch & temporary test scripts
+scratch/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log
