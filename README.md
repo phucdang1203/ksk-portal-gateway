@@ -27,50 +27,51 @@ Dự án được thiết kế tách biệt hoàn toàn giữa **Server (`server
 
 ```text
 D:\bv-binhan\projects\ksk-portal-gateway\
-├── docker-compose.yml                        # Triển khai nhanh bằng Docker (Server + Web Client)
-├── mo_port_firewall_8790.bat                 # Mở port 8790 trên Windows Firewall cho mạng LAN
 ├── KE_HOACH_VA_AUDIT_KSK_PORTAL_GATEWAY.md   # Tài liệu Kế hoạch thiết kế & Audit toàn diện
-├── server/                                   # SERVER RIÊNG BIỆT (FastAPI - Port 8790)
-│   ├── start_server.bat                      # Script khởi chạy Server độc lập (Auto-Reload)
+├── samples/                                  # Thư mục file CSV / Excel mẫu
+├── server/                                   # TOÀN BỘ BACKEND SERVER & DOCKER (Port 8790)
+│   ├── start_docker_server.bat               # File chạy riêng Docker Server (Tắt cũ -> Build mới -> Chạy lại)
+│   ├── docker-compose.yml                    # Cấu hình Docker cho Backend Server + Database Volume
+│   ├── docker-backup.bat / docker-restore.bat# Sao lưu trọn gói & Khôi phục di chuyển máy chủ
+│   ├── mo_port_firewall_8790.bat             # Mở port 8790 trên Windows Firewall cho mạng LAN
 │   ├── .env / .env.example                   # Cấu hình môi trường Server
-│   ├── Dockerfile                            # Dockerfile riêng cho Server
+│   ├── Dockerfile                            # Dockerfile cho Backend Server
 │   ├── main.py                               # Entrypoint FastAPI Server
-│   ├── data/                                 # Lưu trữ SQLite WAL (ksk_gateway.db), uploads & samples
-│   ├── core/                                 # Cấu hình & Bảo mật JWT
-│   ├── database/                             # Quản lý CSDL cục bộ
+│   ├── core/                                 # Cấu hình, Phân quyền 3 tầng & Bảo mật JWT
+│   ├── database/                             # Quản lý CSDL SQLite WAL (Volume ksk_gateway_data)
+│   ├── routers/                              # API Quản trị Khoa phòng, Chức vụ, User, Máy trạm
 │   ├── validators/                           # Bộ kiểm tra 4 lớp TT32 / TT36 / QĐ2062
 │   ├── parsers/                              # Bộ đọc & xuất mẫu CSV / Excel
 │   └── services/                             # Dịch vụ chuẩn bị gói ký số & Đẩy cổng BYT
-└── client/                                   # CLIENT RIÊNG BIỆT (Electron + React - Port 5190)
-    ├── start_client.bat                      # Script khởi chạy Client độc lập
+└── client/                                   # TOÀN BỘ APP CLIENT DESKTOP (Electron + React)
+    ├── start_client.bat                      # File chạy riêng App Client (Đóng cửa sổ cũ -> Build mới -> Mở App)
     ├── .env / .env.example                   # Cấu hình kết nối Backend (VITE_API_BASE_URL)
-    ├── Dockerfile                            # Dockerfile riêng cho Client Web
     ├── electron/main.js                      # Kết nối USB Token Windows Cert Store & Ký số 1 lần
-    ├── src/                                  # Giao diện điều khiển 4 bước
+    ├── src/                                  # Giao diện điều khiển 4 bước & Quản trị hệ thống
     └── dist-release/                         # Bộ cài đặt Windows (.exe)
 ```
 
 ---
 
-## 3. Hướng Dẫn Chạy Độc Lập Từng Phần (Giống `ksk-sync-system`)
+## 3. Hướng Dẫn Chạy Riêng Lẻ Từng Phần & Sao Lưu Docker
 
-### 3.1. Khởi chạy Server (`server/start_server.bat`)
+### 3.1. Chạy riêng Backend Server trên Docker (`server/start_docker_server.bat`)
 ```powershell
 cd D:\bv-binhan\projects\ksk-portal-gateway\server
-.\start_server.bat
+.\start_docker_server.bat
 ```
+- Tự động tắt container `ksk-gateway-server` cũ -> Build lại mã nguồn `server\` mới nhất -> Khởi động lại Docker Server ở cổng `8790` (giữ nguyên toàn bộ Database trong Volume `ksk_gateway_data`).
 - FastAPI REST Service: `http://127.0.0.1:8790` (Swagger Docs: `http://127.0.0.1:8790/docs`)
 
-### 3.2. Khởi chạy Client (`client/start_client.bat`)
+### 3.2. Chạy riêng App Client Desktop để test code mới (`client/start_client.bat`)
 ```powershell
 cd D:\bv-binhan\projects\ksk-portal-gateway\client
 .\start_client.bat
 ```
-- Giao diện Vite/Electron: `http://127.0.0.1:5190`
-- Hoặc cài đặt trực tiếp từ file đóng gói: `client/dist-release/BinhAn KSK Portal Gateway Setup 1.0.3.exe`.
+- Tự động đóng cửa sổ App Client KSK cũ đang mở -> Build code giao diện mới (`vite build`) -> Bật trực tiếp cửa sổ App Desktop Electron lên màn hình kết nối vào `http://127.0.0.1:8790`.
+- Khi cần xuất bộ cài đặt `.exe` cho máy trạm: chạy `npm run pack` trong thư mục `client\` (file `.exe` xuất ra `client/dist-release/` và tự động gắn vào Docker Server).
 
-### 3.3. Triển khai bằng Docker (`docker-compose`)
-```bash
-cd D:\bv-binhan\projects\ksk-portal-gateway
-docker compose up -d --build
-```
+### 3.3. Sao lưu trọn gói & Di chuyển Docker Server sang máy chủ khác (`server/docker-backup.bat`)
+1. **Tại máy hiện tại**, vào thư mục `server\` và bấm đúp chạy `docker-backup.bat` (hoặc `.\docker-backup.bat -DbOnly` nếu chỉ sao lưu nhanh Database).
+2. Copy thư mục gói vừa xuất trong `server\backups\KSK_DOCKER_FULL_PORTABLE_...` sang máy chủ mới (Windows hoặc Linux đã cài Docker).
+3. **Tại máy chủ mới**, bấm đúp chạy `docker-restore.bat` (Windows) hoặc `sh docker-restore.sh` (Linux) — hệ thống sẽ tự nạp Docker Image, khôi phục nguyên vẹn Database vào Volume `ksk_gateway_data` và tự động chạy bình thường trên cổng `8790`.

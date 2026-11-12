@@ -59,6 +59,8 @@ server/data/uploads/*
 
 # Scratch & temporary test scripts
 scratch/
+backups/
+**/backups/
 
 # IDE & OS
 .idea/

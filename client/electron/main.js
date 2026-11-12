@@ -12,8 +12,10 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID)
 }
 
-const IS_DEV = process.env.NODE_ENV === 'development' || !app.isPackaged
+const FORCE_DIST = process.env.KSK_LOAD_DIST === '1'
+const IS_DEV = !FORCE_DIST && process.env.NODE_ENV === 'development'
 const CONFIG_PATH = path.join(app.getPath('userData'), 'ksk-gateway-config.json')
+const PID_FILE_PATH = path.join(app.getPath('userData'), 'ksk-client.pid')
 const LOCAL_RSA_KEY_PATH = path.join(app.getPath('userData'), 'hospital-client-token-rsa2048.pem')
 
 function loadConfig() {
@@ -161,15 +163,20 @@ function signDigestWithWindowsCertStore(thumbprint, stringToSign) {
 
 function createWindow() {
   const pkg = require('../package.json')
-  const iconPath = path.join(__dirname, 'icon.ico')
+  const iconCandidates = [
+    path.join(__dirname, 'icon.ico'),
+    path.join(__dirname, '../build/icon.ico')
+  ]
+  const iconPath = iconCandidates.find((p) => fs.existsSync(p))
 
   mainWindow = new BrowserWindow({
     width: 1420,
     height: 880,
     minWidth: 1120,
     minHeight: 700,
+    show: false,
     title: `Hệ Thống Đẩy Cổng Khám Sức Khỏe Quốc Gia - Bệnh Viện Đa Khoa Bình An (v${pkg.version})`,
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -178,6 +185,12 @@ function createWindow() {
   })
 
   Menu.setApplicationMenu(null)
+
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow) return
+    mainWindow.show()
+    mainWindow.focus()
+  })
 
   if (IS_DEV) {
     mainWindow.loadURL('http://127.0.0.1:5190')
@@ -193,14 +206,30 @@ if (!gotTheLock) {
   app.on('second-instance', () => {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
       mainWindow.focus()
     }
   })
 
   app.whenReady().then(() => {
+    try {
+      fs.mkdirSync(path.dirname(PID_FILE_PATH), { recursive: true })
+      fs.writeFileSync(PID_FILE_PATH, String(process.pid), 'utf-8')
+    } catch (e) {}
     createWindow()
   })
 }
+
+app.on('will-quit', () => {
+  try {
+    if (fs.existsSync(PID_FILE_PATH)) {
+      const savedPid = fs.readFileSync(PID_FILE_PATH, 'utf-8').trim()
+      if (savedPid === String(process.pid)) {
+        fs.unlinkSync(PID_FILE_PATH)
+      }
+    }
+  } catch (e) {}
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
@@ -208,8 +237,95 @@ app.on('window-all-closed', () => {
   }
 })
 
+// ==================== THÔNG TIN MẠNG & PHẦN CỨNG MÁY TRẠM ====================
+const VIRTUAL_ADAPTER_RE = /virtualbox|vmware|hyper-v|vethernet|npcap|loopback|bluetooth|tap-|tun\d|docker|wsl|zerotier|tailscale|radmin|hamachi/i
+const LAN_NAME_RE = /ethernet|lan|local area/i
+const WIFI_NAME_RE = /wi-?fi|wlan|wireless/i
+
+function getNetworkAddresses() {
+  try {
+    const nets = os.networkInterfaces()
+    const candidates = []
+    for (const name of Object.keys(nets)) {
+      if (VIRTUAL_ADAPTER_RE.test(name)) continue
+      for (const net of nets[name] || []) {
+        if (net.family !== 'IPv4' || net.internal) continue
+        if (net.address.startsWith('169.254.')) continue
+        let type = 'other'
+        if (LAN_NAME_RE.test(name)) type = 'lan'
+        else if (WIFI_NAME_RE.test(name)) type = 'wifi'
+        const mac = net.mac && net.mac !== '00:00:00:00:00:00' ? String(net.mac).toUpperCase() : null
+        candidates.push({ name, address: net.address, type, mac })
+      }
+    }
+    const priority = { lan: 0, wifi: 1, other: 2 }
+    candidates.sort((a, b) => priority[a.type] - priority[b.type])
+    return candidates
+  } catch (err) {
+    return []
+  }
+}
+
+function getLocalIp() {
+  const [best] = getNetworkAddresses()
+  return best ? best.address : '127.0.0.1'
+}
+
 // ==================== IPC HANDLERS ====================
 ipcMain.handle('get-config', () => loadConfig())
+
+ipcMain.handle('get-local-ip', () => getLocalIp())
+
+ipcMain.handle('get-network-addresses', () => getNetworkAddresses())
+
+ipcMain.handle('get-system-info', () => {
+  try {
+    const nets = getNetworkAddresses()
+    const primaryMac = nets.find((n) => n.mac)?.mac || null
+    const localIp = nets[0]?.address || null
+    const cpus = os.cpus() || []
+    const cpuModel = cpus[0]?.model ? String(cpus[0].model).replace(/\s+/g, ' ').trim() : ''
+    const cpuInfo = cpuModel ? `${cpuModel} (${cpus.length} luồng)` : (cpus.length ? `${cpus.length} luồng CPU` : null)
+    const totalRamGb = Math.round((os.totalmem() / (1024 ** 3)) * 10) / 10
+    const uptimeHours = Math.round((os.uptime() / 3600) * 10) / 10
+    const osUser = os.userInfo()?.username || ''
+    const osEdition = typeof os.version === 'function' ? os.version() : ''
+    const osRelease = osEdition ? `${osEdition} (${os.release()})` : os.release()
+    return {
+      hostname: os.hostname(),
+      os_username: osUser,
+      platform: `${os.type()} ${os.release()} (${os.arch()})`,
+      os_release: osRelease,
+      arch: os.arch(),
+      mac_address: primaryMac,
+      local_ip: localIp,
+      cpu_info: cpuInfo,
+      total_ram_gb: totalRamGb,
+      os_uptime_hours: uptimeHours,
+      network_interfaces: nets
+    }
+  } catch (err) {
+    return {
+      hostname: os.hostname(),
+      platform: os.platform(),
+      os_username: ''
+    }
+  }
+})
+
+ipcMain.on('window-minimize', () => {
+  if (mainWindow) mainWindow.minimize()
+})
+
+ipcMain.on('window-maximize', () => {
+  if (!mainWindow) return
+  if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  else mainWindow.maximize()
+})
+
+ipcMain.on('window-close', () => {
+  if (mainWindow) mainWindow.close()
+})
 
 ipcMain.handle('save-config', (_event, cfg) => {
   const saved = saveConfig(cfg)

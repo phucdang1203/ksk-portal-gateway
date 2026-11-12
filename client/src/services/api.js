@@ -1,7 +1,26 @@
 import axios from 'axios'
 
+export const APP_CLIENT_VERSION = '1.0.3'
+
 const STORAGE_SERVER_KEY = 'ksk_gateway_server_url'
 const STORAGE_TOKEN_KEY = 'ksk_gateway_auth_token'
+const STORAGE_SESSION_UID_KEY = 'ksk_gateway_session_uid'
+
+function getOrCreateSessionUid() {
+  try {
+    let uid = localStorage.getItem(STORAGE_SESSION_UID_KEY)
+    if (!uid) {
+      const rand = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+      uid = `ksk_ws_${rand}`
+      localStorage.setItem(STORAGE_SESSION_UID_KEY, uid)
+    }
+    return uid
+  } catch (e) {
+    return `ksk_ws_${Date.now()}`
+  }
+}
 
 function getInitialBaseUrl() {
   const saved = localStorage.getItem(STORAGE_SERVER_KEY)
@@ -20,6 +39,58 @@ function getInitialBaseUrl() {
 }
 
 let currentBaseUrl = getInitialBaseUrl()
+let cachedSysInfo = null
+let cachedSysInfoAt = 0
+
+async function collectClientSystemInfo(forceRefresh = false) {
+  const now = Date.now()
+  if (!forceRefresh && cachedSysInfo && now - cachedSysInfoAt < 60000) {
+    return cachedSysInfo
+  }
+
+  let appVer = APP_CLIENT_VERSION
+  try {
+    if (window.electronAPI?.getAppVersion) {
+      appVer = (await window.electronAPI.getAppVersion()) || APP_CLIENT_VERSION
+    }
+  } catch (e) {}
+
+  let sys = {
+    hostname: window.location.hostname || 'Web-Client',
+    os_username: '',
+    platform: navigator.platform || 'Browser',
+    os_release: '',
+    arch: '',
+    mac_address: '',
+    local_ip: '',
+    cpu_info: navigator.hardwareConcurrency ? `${navigator.hardwareConcurrency} luồng (Trình duyệt)` : '',
+    total_ram_gb: navigator.deviceMemory || null,
+    os_uptime_hours: null,
+    network_interfaces: []
+  }
+
+  try {
+    if (window.electronAPI?.getSystemInfo) {
+      const eInfo = await window.electronAPI.getSystemInfo()
+      if (eInfo && typeof eInfo === 'object') {
+        const { username: legacyOsUser, ...safeInfo } = eInfo
+        sys = {
+          ...sys,
+          ...safeInfo,
+          os_username: safeInfo.os_username || legacyOsUser || ''
+        }
+      }
+    }
+  } catch (e) {}
+
+  cachedSysInfo = {
+    ...sys,
+    session_uid: getOrCreateSessionUid(),
+    client_version: appVer
+  }
+  cachedSysInfoAt = now
+  return cachedSysInfo
+}
 
 const http = axios.create({
   baseURL: currentBaseUrl,
@@ -32,12 +103,46 @@ http.interceptors.request.use((config) => {
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  config.headers['X-Session-Uid'] = getOrCreateSessionUid()
+  if (cachedSysInfo?.local_ip) {
+    config.headers['X-Client-Lan-IP'] = cachedSysInfo.local_ip
+  }
   return config
 })
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error?.response?.status
+    const detail = error?.response?.data?.detail || ''
+    const blockCode = error?.response?.headers?.['x-block-code']
+    const reqUrl = String(error?.config?.url || '')
+
+    if (status === 403 && (blockCode === 'IP_BLOCKED' || detail.includes('IP máy trạm'))) {
+      localStorage.removeItem(STORAGE_TOKEN_KEY)
+      window.dispatchEvent(new CustomEvent('ksk:ip-blocked', { detail }))
+    } else if (status === 401 && !reqUrl.includes('/api/auth/login')) {
+      const hadToken = Boolean(localStorage.getItem(STORAGE_TOKEN_KEY))
+      if (hadToken) {
+        localStorage.removeItem(STORAGE_TOKEN_KEY)
+        window.dispatchEvent(new CustomEvent('ksk:session-expired', { detail }))
+      }
+    }
+    return Promise.reject(error)
+  }
+)
 
 export const api = {
   getServerUrl() {
     return currentBaseUrl
+  },
+
+  getSessionUid() {
+    return getOrCreateSessionUid()
+  },
+
+  async getClientSystemInfo(force = false) {
+    return collectClientSystemInfo(force)
   },
 
   async setServerUrl(url) {
@@ -63,23 +168,193 @@ export const api = {
     return res.data
   },
 
+  // ─── Xác thực & Hồ sơ cá nhân ──────────────────────────────────────────────
   async login(username, password) {
-    const res = await http.post('/api/auth/login', { username, password })
+    const sysInfo = await collectClientSystemInfo()
+    const res = await http.post('/api/auth/login', {
+      ...sysInfo,
+      username,
+      password
+    })
     if (res.data?.access_token) {
       localStorage.setItem(STORAGE_TOKEN_KEY, res.data.access_token)
     }
     return res.data
   },
 
-  logout() {
-    localStorage.removeItem(STORAGE_TOKEN_KEY)
+  async logout() {
+    try {
+      await http.post('/api/auth/logout')
+    } catch (e) {
+      // Bỏ qua lỗi mạng khi đăng xuất cục bộ
+    } finally {
+      localStorage.removeItem(STORAGE_TOKEN_KEY)
+    }
   },
 
   async getMe() {
+    await collectClientSystemInfo()
     const res = await http.get('/api/auth/me')
     return res.data
   },
 
+  async updateMyProfile(payload) {
+    const res = await http.put('/api/auth/profile', payload)
+    return res.data
+  },
+
+  // ─── Heartbeat & Giám sát Máy trạm kết nối ────────────────────────────────
+  async sendHeartbeat() {
+    const sysInfo = await collectClientSystemInfo()
+    const res = await http.post('/api/system/heartbeat', sysInfo)
+    return res.data
+  },
+
+  async getConnectedClients() {
+    const res = await http.get('/api/system/connected-clients')
+    return res.data
+  },
+
+  async getConnectedClientDetail(clientIp) {
+    const res = await http.get(`/api/system/connected-clients/${encodeURIComponent(clientIp)}/detail`)
+    return res.data
+  },
+
+  async blockClientIp(clientIp, reason) {
+    const res = await http.post(`/api/system/connected-clients/${encodeURIComponent(clientIp)}/block`, { reason })
+    return res.data
+  },
+
+  async unblockClientIp(clientIp) {
+    const res = await http.post(`/api/system/connected-clients/${encodeURIComponent(clientIp)}/unblock`)
+    return res.data
+  },
+
+  async logoutClientAccount(clientIp, userId) {
+    const res = await http.post(
+      `/api/system/connected-clients/${encodeURIComponent(clientIp)}/accounts/${userId}/logout`
+    )
+    return res.data
+  },
+
+  // ─── Khoa / Phòng (Tầng A) ────────────────────────────────────────────────
+  async getDepartments(includeInactive = false) {
+    const res = await http.get('/api/departments', {
+      params: { include_inactive: includeInactive }
+    })
+    return res.data
+  },
+
+  async createDepartment(payload) {
+    const res = await http.post('/api/departments', payload)
+    return res.data
+  },
+
+  async updateDepartment(deptId, payload) {
+    const res = await http.put(`/api/departments/${deptId}`, payload)
+    return res.data
+  },
+
+  async lockDepartment(deptId) {
+    const res = await http.delete(`/api/departments/${deptId}`)
+    return res.data
+  },
+
+  async restoreDepartment(deptId) {
+    const res = await http.post(`/api/departments/${deptId}/restore`)
+    return res.data
+  },
+
+  async purgeDepartment(deptId) {
+    const res = await http.delete(`/api/departments/${deptId}/purge`)
+    return res.data
+  },
+
+  async getDepartmentPermissions(deptId) {
+    const res = await http.get(`/api/departments/${deptId}/permissions`)
+    return res.data
+  },
+
+  async updateDepartmentPermissions(deptId, payload) {
+    const res = await http.put(`/api/departments/${deptId}/permissions`, payload)
+    return res.data
+  },
+
+  // ─── Danh mục Chức vụ (Tầng B) ────────────────────────────────────────────
+  async getPositions(params = {}) {
+    const res = await http.get('/api/positions', { params })
+    return res.data
+  },
+
+  async createPosition(payload) {
+    const res = await http.post('/api/positions', payload)
+    return res.data
+  },
+
+  async updatePosition(posId, payload) {
+    const res = await http.put(`/api/positions/${posId}`, payload)
+    return res.data
+  },
+
+  async deletePosition(posId) {
+    const res = await http.delete(`/api/positions/${posId}`)
+    return res.data
+  },
+
+  async getPositionPermissions(posId) {
+    const res = await http.get(`/api/positions/${posId}/permissions`)
+    return res.data
+  },
+
+  async updatePositionPermissions(posId, payload) {
+    const res = await http.put(`/api/positions/${posId}/permissions`, payload)
+    return res.data
+  },
+
+  // ─── Người dùng & Ma trận Quyền (Tầng C / A∪B∪C) ──────────────────────────
+  async getUsers(params = {}) {
+    const res = await http.get('/api/users', { params })
+    return res.data
+  },
+
+  async createUser(payload) {
+    const res = await http.post('/api/users', payload)
+    return res.data
+  },
+
+  async updateUser(userId, payload) {
+    const res = await http.put(`/api/users/${userId}`, payload)
+    return res.data
+  },
+
+  async deleteUser(userId) {
+    const res = await http.delete(`/api/users/${userId}`)
+    return res.data
+  },
+
+  async assignDepartmentHead(deptId, newHeadUserId) {
+    const res = await http.put(`/api/users/departments/${deptId}/assign-head`, {
+      new_head_user_id: newHeadUserId
+    })
+    return res.data
+  },
+
+  async getAllPermissions() {
+    const res = await http.get('/api/users/permissions/all')
+    return res.data
+  },
+
+  async getUserPermissionMatrix(userId) {
+    const res = await http.get(`/api/users/${userId}/permission-matrix`)
+    return res.data
+  },
+
+  async updateUserPermissions(userId, payload) {
+    const res = await http.put(`/api/users/${userId}/permissions`, payload)
+    return res.data
+  },
+
+  // ─── Cấu hình Đơn vị & Cổng KSK ───────────────────────────────────────────
   async getConfigs() {
     const res = await http.get('/api/configs')
     return res.data
@@ -94,6 +369,7 @@ export const api = {
     return `${currentBaseUrl}/api/templates/download/${fmt}`
   },
 
+  // ─── Nghiệp vụ KSK 4 Bước ─────────────────────────────────────────────────
   async importBatchFile(file, notes = '') {
     const formData = new FormData()
     formData.append('file', file)

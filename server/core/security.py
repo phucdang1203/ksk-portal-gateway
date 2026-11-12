@@ -16,14 +16,22 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     return hmac.compare_digest(expected, password_hash)
 
 
-def create_access_token(username: str, role: str = "ADMIN") -> str:
+def create_access_token(
+    username: str,
+    role: str = "admin",
+    token_version: int = 1,
+    user_id: Optional[int] = None,
+) -> str:
     now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "sub": username,
         "role": role,
+        "tv": int(token_version or 1),
         "iat": now,
         "exp": now + datetime.timedelta(hours=JWT_EXPIRE_HOURS),
     }
+    if user_id is not None:
+        payload["uid"] = int(user_id)
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 

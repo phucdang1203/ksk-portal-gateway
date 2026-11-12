@@ -46,7 +46,23 @@ from server.database.db import (
     refresh_batch_counters,
     now_vn_str,
 )
-from server.core.security import verify_password, create_access_token, decode_access_token
+from server.core.security import hash_password, verify_password, create_access_token
+from server.core.deps import (
+    get_current_user,
+    get_current_user_optional,
+    require_permission,
+    require_any_permission,
+    enrich_user,
+    extract_client_ip,
+    assert_ip_not_blocked,
+)
+from server.routers import (
+    departments_router,
+    positions_router,
+    users_router,
+    system_router,
+)
+from server.routers.system_router import upsert_workstation_connection, SERVER_APP_VERSION
 from server.validators.ksk_validator import validate_ksk_record
 from server.parsers.file_importer import (
     parse_uploaded_file,
@@ -165,11 +181,37 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(departments_router.router)
+app.include_router(positions_router.router)
+app.include_router(users_router.router)
+app.include_router(system_router.router)
+
 
 # ==================== PYDANTIC MODELS ====================
 class LoginRequest(BaseModel):
     username: str
     password: str
+    session_uid: Optional[str] = None
+    hostname: Optional[str] = None
+    os_username: Optional[str] = None
+    platform: Optional[str] = None
+    os_release: Optional[str] = None
+    arch: Optional[str] = None
+    mac_address: Optional[str] = None
+    cpu_info: Optional[str] = None
+    total_ram_gb: Optional[float] = None
+    os_uptime_hours: Optional[float] = None
+    network_interfaces: Optional[List[Dict[str, Any]]] = None
+    client_version: Optional[str] = None
+
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    cchn: Optional[str] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None
 
 
 class ConfigSaveRequest(BaseModel):
@@ -221,20 +263,6 @@ class PushPortalRequest(BaseModel):
     batch_id: Optional[int] = None
 
 
-# ==================== AUTH DEPENDENCY ====================
-def get_current_user(authorization: Optional[str] = Header(None)) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Thiếu hoặc sai định dạng Bearer Token")
-    token = authorization.split(" ")[1]
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Phiên đăng nhập đã hết hạn hoặc không hợp lệ")
-    user = get_user(payload.get("sub", ""))
-    if not user:
-        raise HTTPException(status_code=401, detail="Tài khoản không tồn tại hoặc đã bị khóa")
-    return user
-
-
 # ==================== HEALTH & AUTO-UPDATE ENDPOINTS ====================
 @app.get("/api/health")
 def health_check():
@@ -242,7 +270,7 @@ def health_check():
     return {
         "status": "ok",
         "app": "ksk-portal-gateway",
-        "version": "1.0.1",
+        "version": SERVER_APP_VERSION,
         "hospital": cfg.get("hospital", {}).get("ten_benh_vien", "Bệnh viện Đa khoa Bình An"),
         "ma_cskcb": cfg.get("hospital", {}).get("ma_cskcb", "91034"),
     }
@@ -268,7 +296,7 @@ def _find_latest_client_installer() -> Optional[str]:
 @app.get("/api/system/version")
 def get_system_version():
     installer = _find_latest_client_installer()
-    latest_ver = "1.0.1"
+    latest_ver = SERVER_APP_VERSION
     size = None
     sha256_hex = None
     if installer and os.path.exists(installer):
@@ -290,7 +318,7 @@ def get_system_version():
     return {
         "server_version": latest_ver,
         "latest_client_version": latest_ver,
-        "release_notes": f"Bản cập nhật v{latest_ver}: Hệ thống Đẩy Cổng Khám Sức Khỏe Quốc Gia độc lập (Import CSV/Excel -> Check lỗi -> Ký số USB Token Client -> Đẩy Cổng).",
+        "release_notes": f"Bản cập nhật v{latest_ver}: Bổ sung AppShell Sidebar, Quản trị Khoa/Phòng - Chức vụ - Người dùng, Phân quyền 3 tầng (A ∪ B ∪ C) và Giám sát Máy trạm kết nối.",
         "client_download_url": "/api/system/download-client",
         "client_installer_size": size,
         "client_installer_sha256": sha256_hex,
@@ -312,15 +340,68 @@ def download_latest_client():
 # ==================== AUTH ENDPOINTS ====================
 @app.post("/api/auth/login")
 def login(req: LoginRequest, request: Request):
-    user = get_user(req.username.strip())
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    if not user or not verify_password(req.password, user["password_hash"]):
-        add_audit_log(req.username, "LOGIN_FAILED", "Sai tên đăng nhập hoặc mật khẩu", "FAILED", client_ip)
-        raise HTTPException(status_code=400, detail="Tài khoản hoặc mật khẩu không chính xác")
+    client_ip = extract_client_ip(request)
+    conn = get_conn()
+    try:
+        assert_ip_not_blocked(conn, client_ip)
+        raw_user = conn.execute(
+            "SELECT * FROM users WHERE username = ?",
+            (req.username.strip(),),
+        ).fetchone()
 
-    update_user_last_login(user["username"])
-    add_audit_log(user["username"], "LOGIN_SUCCESS", "Đăng nhập hệ thống KSK Portal Gateway", "SUCCESS", client_ip)
-    token = create_access_token(user["username"], user.get("role", "ADMIN"))
+        if not raw_user or not verify_password(req.password, raw_user["password_hash"]):
+            add_audit_log(req.username, "LOGIN_FAILED", "Sai tên đăng nhập hoặc mật khẩu", "FAILED", client_ip)
+            raise HTTPException(status_code=400, detail="Tài khoản hoặc mật khẩu không chính xác")
+
+        user_dict = dict(raw_user)
+        if not int(user_dict.get("is_active") or 0):
+            add_audit_log(req.username, "LOGIN_BLOCKED", "Tài khoản đã bị khóa cố gắng đăng nhập", "FAILED", client_ip)
+            raise HTTPException(status_code=403, detail="Tài khoản của bạn hiện đang bị khóa. Vui lòng liên hệ Quản trị viên.")
+
+        now_s = now_vn_str()
+        conn.execute("UPDATE users SET last_login = ? WHERE id = ?", (now_s, user_dict["id"]))
+        user_dict["last_login"] = now_s
+
+        # Gỡ cờ thu hồi phiên cũ trên IP này (nếu trước đó từng bị Admin đăng xuất từ xa)
+        revoke_key = f"ip:{client_ip}:u:{user_dict['id']}"[:64]
+        conn.execute("DELETE FROM revoked_sessions WHERE session_uid = ?", (revoke_key,))
+        if req.session_uid:
+            conn.execute("DELETE FROM revoked_sessions WHERE session_uid = ?", (req.session_uid[:128],))
+
+        # Ghi nhận phiên làm việc của máy trạm ngay khi đăng nhập
+        upsert_workstation_connection(
+            conn,
+            client_ip=client_ip,
+            session_uid=req.session_uid or request.headers.get("x-session-uid"),
+            user_id=user_dict["id"],
+            user_known=True,
+            is_explicit_login=True,
+            hostname=req.hostname,
+            os_username=req.os_username,
+            platform=req.platform,
+            os_release=req.os_release,
+            arch=req.arch,
+            mac_address=req.mac_address,
+            cpu_info=req.cpu_info,
+            total_ram_gb=req.total_ram_gb,
+            os_uptime_hours=req.os_uptime_hours,
+            network_interfaces=req.network_interfaces,
+            user_agent=request.headers.get("user-agent"),
+            client_version=req.client_version,
+        )
+        conn.commit()
+
+        enriched = enrich_user(conn, user_dict)
+    finally:
+        conn.close()
+
+    add_audit_log(user_dict["username"], "LOGIN_SUCCESS", "Đăng nhập hệ thống KSK Portal Gateway", "SUCCESS", client_ip)
+    token = create_access_token(
+        user_dict["username"],
+        enriched["role"],
+        token_version=int(user_dict.get("token_version") or 1),
+        user_id=user_dict["id"],
+    )
     cfg = get_all_configs()
 
     return {
@@ -328,26 +409,107 @@ def login(req: LoginRequest, request: Request):
         "access_token": token,
         "token_type": "bearer",
         "user": {
-            "username": user["username"],
-            "full_name": user["full_name"],
-            "role": user.get("role", "ADMIN"),
-            "cchn": user.get("cchn", ""),
+            **enriched,
             "hospital": cfg.get("hospital", {}).get("ten_benh_vien", "Bệnh viện Đa khoa Bình An"),
             "ma_cskcb": cfg.get("hospital", {}).get("ma_cskcb", "91034"),
         },
     }
 
 
+@app.post("/api/auth/logout")
+def logout_endpoint(
+    request: Request,
+    current_user: Optional[dict] = Depends(get_current_user_optional),
+):
+    client_ip = extract_client_ip(request)
+    conn = get_conn()
+    try:
+        upsert_workstation_connection(
+            conn,
+            client_ip=client_ip,
+            session_uid=request.headers.get("x-session-uid"),
+            user_id=None,
+            user_known=True,
+            is_explicit_logout=True,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if current_user:
+        add_audit_log(current_user["username"], "LOGOUT", "Đăng xuất khỏi hệ thống", "SUCCESS", client_ip)
+    return {"success": True, "message": "Đã đăng xuất thành công"}
+
+
 @app.get("/api/auth/me")
 def get_me(current_user: dict = Depends(get_current_user)):
     cfg = get_all_configs()
     return {
-        "username": current_user["username"],
-        "full_name": current_user["full_name"],
-        "role": current_user.get("role", "ADMIN"),
-        "cchn": current_user.get("cchn", ""),
+        **current_user,
         "hospital": cfg.get("hospital", {}).get("ten_benh_vien", "Bệnh viện Đa khoa Bình An"),
         "ma_cskcb": cfg.get("hospital", {}).get("ma_cskcb", "91034"),
+    }
+
+
+@app.put("/api/auth/profile")
+def update_my_profile(
+    req: ProfileUpdateRequest,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (current_user["id"],)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Không tìm thấy thông tin tài khoản")
+
+        new_full_name = req.full_name.strip() if req.full_name is not None else row["full_name"]
+        if not new_full_name:
+            raise HTTPException(status_code=400, detail="Họ và tên không được để trống")
+
+        new_email = req.email.strip() if req.email is not None else (row["email"] or "")
+        new_phone = req.phone.strip() if req.phone is not None else (row["phone"] or "")
+        new_cchn = req.cchn.strip() if req.cchn is not None else (row["cchn"] or "")
+        new_pw_hash = row["password_hash"]
+
+        if req.new_password and req.new_password.strip():
+            if not req.current_password or not verify_password(req.current_password, row["password_hash"]):
+                raise HTTPException(status_code=400, detail="Mật khẩu hiện tại không chính xác")
+            if len(req.new_password.strip()) < 4:
+                raise HTTPException(status_code=400, detail="Mật khẩu mới phải có ít nhất 4 ký tự")
+            new_pw_hash = hash_password(req.new_password.strip())
+
+        conn.execute(
+            """
+            UPDATE users
+            SET full_name = ?, email = ?, phone = ?, cchn = ?, password_hash = ?
+            WHERE id = ?
+            """,
+            (new_full_name, new_email, new_phone, new_cchn, new_pw_hash, current_user["id"]),
+        )
+        conn.commit()
+
+        updated_row = conn.execute("SELECT * FROM users WHERE id = ?", (current_user["id"],)).fetchone()
+        enriched = enrich_user(conn, dict(updated_row))
+    finally:
+        conn.close()
+
+    cfg = get_all_configs()
+    add_audit_log(
+        current_user["username"],
+        "UPDATE_PROFILE",
+        "Cập nhật thông tin hồ sơ cá nhân" + (" & đổi mật khẩu" if (req.new_password and req.new_password.strip()) else ""),
+        "SUCCESS",
+        extract_client_ip(request),
+    )
+    return {
+        "success": True,
+        "message": "Đã cập nhật hồ sơ cá nhân thành công",
+        "user": {
+            **enriched,
+            "hospital": cfg.get("hospital", {}).get("ten_benh_vien", "Bệnh viện Đa khoa Bình An"),
+            "ma_cskcb": cfg.get("hospital", {}).get("ma_cskcb", "91034"),
+        },
     }
 
 
@@ -365,7 +527,11 @@ def get_configs_endpoint(current_user: dict = Depends(get_current_user)):
 
 
 @app.put("/api/configs")
-def update_configs_endpoint(req: ConfigSaveRequest, request: Request, current_user: dict = Depends(get_current_user)):
+def update_configs_endpoint(
+    req: ConfigSaveRequest,
+    request: Request,
+    current_user: dict = Depends(require_permission("PERM_SYS_PORTAL_CONFIG")),
+):
     if req.hospital:
         save_config_section("hospital", req.hospital)
     if req.portal:
@@ -375,7 +541,7 @@ def update_configs_endpoint(req: ConfigSaveRequest, request: Request, current_us
             portal_update["password"] = existing_portal["password"]
         save_config_section("portal", portal_update)
 
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    client_ip = extract_client_ip(request)
     add_audit_log(current_user["username"], "UPDATE_CONFIG", "Cập nhật cấu hình Đơn vị & Cổng KSK Quốc gia", "SUCCESS", client_ip)
     return {"success": True, "message": "Đã lưu cấu hình hệ thống thành công"}
 
@@ -407,7 +573,7 @@ async def import_file_batch(
     request: Request,
     file: UploadFile = File(...),
     notes: Optional[str] = Form(""),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_BATCH_IMPORT")),
 ):
     """
     Nhập dữ liệu hồ sơ KSK từ file CSV (.csv) hoặc Excel (.xlsx, .xls).
@@ -535,7 +701,9 @@ async def import_file_batch(
 
 
 @app.get("/api/batches")
-def list_batches(current_user: dict = Depends(get_current_user)):
+def list_batches(
+    current_user: dict = Depends(require_any_permission("PERM_KSK_WORKSPACE_VIEW", "PERM_KSK_HISTORY_VIEW")),
+):
     conn = get_conn()
     try:
         rows = conn.execute("SELECT * FROM import_batches ORDER BY id DESC").fetchall()
@@ -545,7 +713,11 @@ def list_batches(current_user: dict = Depends(get_current_user)):
 
 
 @app.delete("/api/batches/{batch_id}")
-def delete_batch(batch_id: int, request: Request, current_user: dict = Depends(get_current_user)):
+def delete_batch(
+    batch_id: int,
+    request: Request,
+    current_user: dict = Depends(require_permission("PERM_KSK_BATCH_DELETE")),
+):
     conn = get_conn()
     try:
         b = conn.execute("SELECT * FROM import_batches WHERE id = ?", (batch_id,)).fetchone()
@@ -634,7 +806,7 @@ def list_records(
     stage_filter: Optional[str] = None,
     page: int = 1,
     page_size: int = 15,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_WORKSPACE_VIEW")),
 ):
     page = max(1, int(page))
     page_size = max(1, min(200, int(page_size)))
@@ -664,7 +836,7 @@ def get_records_stats(
     batch_id: Optional[int] = None,
     search: Optional[str] = None,
     loai_ksk: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_WORKSPACE_VIEW")),
 ):
     where_sql, params = _build_record_where_clause(batch_id, search, loai_ksk, None)
     conn = get_conn()
@@ -706,7 +878,7 @@ def select_record_ids(
     search: Optional[str] = None,
     loai_ksk: Optional[str] = None,
     stage_filter: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_WORKSPACE_VIEW")),
 ):
     where_sql, params = _build_record_where_clause(batch_id, search, loai_ksk, stage_filter)
     conn = get_conn()
@@ -735,7 +907,10 @@ def select_record_ids(
 
 
 @app.get("/api/records/{record_id}")
-def get_record_detail(record_id: int, current_user: dict = Depends(get_current_user)):
+def get_record_detail(
+    record_id: int,
+    current_user: dict = Depends(require_permission("PERM_KSK_WORKSPACE_VIEW")),
+):
     conn = get_conn()
     try:
         r = conn.execute("SELECT * FROM ksk_records WHERE id = ?", (record_id,)).fetchone()
@@ -751,7 +926,7 @@ def update_record_fields(
     record_id: int,
     req: RecordUpdateRequest,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_RECORD_EDIT")),
 ):
     """
     Cập nhật / bổ sung các trường thông tin còn thiếu của 1 hồ sơ KSK,
@@ -855,7 +1030,7 @@ def update_record_fields(
 def bulk_complete_records(
     req: BulkCompleteRequest,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_RECORD_EDIT")),
 ):
     """
     Hỗ trợ xác nhận nhanh chữ ký chuyên khoa, chữ ký bác sĩ kết luận và điền giá trị mặc định
@@ -971,7 +1146,10 @@ def bulk_complete_records(
 
 
 @app.post("/api/records/recheck")
-def recheck_records(req: RecheckRequest, current_user: dict = Depends(get_current_user)):
+def recheck_records(
+    req: RecheckRequest,
+    current_user: dict = Depends(require_any_permission("PERM_KSK_WORKSPACE_VIEW", "PERM_KSK_RECORD_EDIT")),
+):
     """
     Chạy kiểm tra (Check) lại toàn bộ hồ sơ trong lô hoặc danh sách chọn trước khi thực hiện Ký số.
     Báo cáo chi tiết hồ sơ nào còn thiếu thông tin và hồ sơ nào đã đầy đủ.
@@ -1053,7 +1231,10 @@ def recheck_records(req: RecheckRequest, current_user: dict = Depends(get_curren
 
 # ==================== BƯỚC 3: KÝ SỐ ĐIỆN TỬ BỆNH VIỆN (1 LẦN CHO TẤT CẢ HỒ SƠ ĐỦ ĐK) ====================
 @app.post("/api/records/prepare-signing")
-def prepare_signing_endpoint(req: PrepareSigningRequest, current_user: dict = Depends(get_current_user)):
+def prepare_signing_endpoint(
+    req: PrepareSigningRequest,
+    current_user: dict = Depends(require_permission("PERM_KSK_SIGN_TOKEN")),
+):
     """
     Bước 3A: Kiểm tra điều kiện nghiêm ngặt trước khi Ký số Bệnh viện.
     - Đầu tiên kiểm tra hồ sơ nào còn thiếu thông tin.
@@ -1153,7 +1334,7 @@ def prepare_signing_endpoint(req: PrepareSigningRequest, current_user: dict = De
 def commit_signature_endpoint(
     req: CommitSignatureRequest,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_SIGN_TOKEN")),
 ):
     """
     Bước 3B: Nhận chữ ký số điện tử của Bệnh viện (từ USB Token cắm trực tiếp ở máy Client)
@@ -1290,7 +1471,7 @@ def commit_signature_endpoint(
 def push_to_portal_endpoint(
     req: PushPortalRequest,
     request: Request,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_permission("PERM_KSK_PUSH_PORTAL")),
 ):
     """
     Bước 4: Thực sự đẩy dữ liệu lên Cổng Quốc gia.
@@ -1444,7 +1625,10 @@ def push_to_portal_endpoint(
 
 # ==================== LOGS & HISTORY ENDPOINTS ====================
 @app.get("/api/push-logs")
-def get_push_logs(limit: int = 50, current_user: dict = Depends(get_current_user)):
+def get_push_logs(
+    limit: int = 50,
+    current_user: dict = Depends(require_permission("PERM_KSK_HISTORY_VIEW")),
+):
     conn = get_conn()
     try:
         rows = conn.execute("SELECT * FROM portal_push_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
@@ -1454,7 +1638,10 @@ def get_push_logs(limit: int = 50, current_user: dict = Depends(get_current_user
 
 
 @app.get("/api/audit-logs")
-def get_audit_logs_endpoint(limit: int = 100, current_user: dict = Depends(get_current_user)):
+def get_audit_logs_endpoint(
+    limit: int = 100,
+    current_user: dict = Depends(require_permission("PERM_KSK_HISTORY_VIEW")),
+):
     conn = get_conn()
     try:
         rows = conn.execute("SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
@@ -1476,16 +1663,16 @@ if __name__ == "__main__":
     ma_cskcb = cfg.get("hospital", {}).get("ma_cskcb", "91034")
     port = int(os.getenv("PORT", "8790"))
 
+    os.environ["PYTHONPATH"] = os.pathsep.join([str(ROOT_DIR), str(SERVER_DIR)])
+    use_reload = os.getenv("UVICORN_RELOAD", "true").strip().lower() in ("1", "true", "yes")
     print("=" * 66)
     print(f"  Port: {port} | Co so KCB: {hosp_name} ({ma_cskcb})")
     print(f"  Local Database: SQLite WAL ({DB_PATH})")
     print("  Kiem tra 4 lop & Ky so USB Token Client: HOAT DONG")
     print("  Tai khoan: admin | Mat khau: admin123")
-    print("  Che do tu dong cap nhat (Hot Reload): BAT")
+    print(f"  Che do tu dong cap nhat (Hot Reload): {'BAT' if use_reload else 'TAT (Docker/Production)'}")
     print("=" * 66)
     try:
-        uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True, log_level="info")
+        uvicorn.run("server.main:app", host="0.0.0.0", port=port, reload=use_reload, log_level="info")
     except KeyboardInterrupt:
         pass
-    finally:
-        os._exit(0)

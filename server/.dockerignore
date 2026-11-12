@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+data/
+backups/
+.env
+*.log
+*.bat
+*.ps1
+*.sh
+*.tar
+*.tar.gz
+docker-compose*.yml

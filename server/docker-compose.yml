@@ -1,0 +1,48 @@
+# ==============================================================================
+# DOCKER COMPOSE - BACKEND SERVER & DATABASE (KSK PORTAL GATEWAY)
+# App Client la ung dung Desktop (.exe), Docker chi can chay Server + Database!
+# Lenh khoi chay / cap nhat: server\start_docker_server.bat
+# Lenh sao luu di chuyen:    server\docker-backup.bat
+# ==============================================================================
+
+name: ksk-portal-gateway
+
+services:
+  ksk-gateway-server:
+    image: ksk-portal-gateway-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ksk-gateway-server
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8790}:8790"
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      - PORT=8790
+      - DATA_DIR=/app/server/data
+      - UVICORN_RELOAD=false
+      - JWT_SECRET=${JWT_SECRET:-binhan-ksk-portal-gateway-secret-key-2026}
+    volumes:
+      - ksk_gateway_data:/app/server/data
+      - ../client/dist-release:/app/client/dist-release
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ksk-gateway-net
+
+volumes:
+  ksk_gateway_data:
+    name: ksk_gateway_data
+
+networks:
+  ksk-gateway-net:
+    name: ksk-gateway-net
+    driver: bridge

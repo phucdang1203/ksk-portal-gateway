@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import { X, Server, Globe, Building2, Save, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
 import { api } from '../services/api'
+import { PermBadge } from '../utils/permissions'
 
-export default function ServerConfigModal({ isOpen, onClose, onConfigUpdated }) {
+export default function ServerConfigModal({ isOpen, onClose, onConfigUpdated, canManagePortal = false }) {
   const [serverUrl, setServerUrl] = useState(api.getServerUrl())
   const [testingServer, setTestingServer] = useState(false)
   const [serverTestMsg, setServerTestMsg] = useState(null)
@@ -33,6 +34,7 @@ export default function ServerConfigModal({ isOpen, onClose, onConfigUpdated }) 
   }, [isOpen])
 
   const loadServerConfigs = async () => {
+    if (!canManagePortal) return
     try {
       const res = await api.getConfigs()
       if (res.success) {
@@ -70,9 +72,15 @@ export default function ServerConfigModal({ isOpen, onClose, onConfigUpdated }) 
     setSaving(true)
     setServerTestMsg(null)
     try {
-      await api.setServerUrl(serverUrl)
-      await api.saveConfigs({ hospital, portal })
-      setServerTestMsg({ type: 'success', text: 'Đã lưu cấu hình Server & Cổng Quốc gia thành công!' })
+      const cleanUrl = await api.setServerUrl(serverUrl)
+      setServerUrl(cleanUrl)
+      await api.checkHealth(cleanUrl)
+      if (canManagePortal) {
+        await api.saveConfigs({ hospital, portal })
+        setServerTestMsg({ type: 'success', text: 'Đã lưu cấu hình Server & Cổng Quốc gia thành công!' })
+      } else {
+        setServerTestMsg({ type: 'success', text: `Đã lưu địa chỉ kết nối Server (${cleanUrl}) thành công!` })
+      }
       if (onConfigUpdated) onConfigUpdated()
     } catch (err) {
       setServerTestMsg({
@@ -136,120 +144,125 @@ export default function ServerConfigModal({ isOpen, onClose, onConfigUpdated }) 
             </div>
           </div>
 
-          {/* 2. Thông tin Bệnh viện / Cơ sở KCB */}
-          <div style={{ border: '1px solid var(--border)', borderRadius: '8px', padding: '14px 16px' }}>
-            <div style={{ fontWeight: 700, marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Building2 size={15} color="#0284c7" />
-              2. Thông tin Cơ sở Khám chữa bệnh (Đơn vị đẩy dữ liệu)
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' }}>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Mã CSKCB *</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={hospital.ma_cskcb}
-                  onChange={(e) => setHospital({ ...hospital, ma_cskcb: e.target.value })}
-                />
+          {canManagePortal && (
+            <>
+              {/* 2. Thông tin Bệnh viện / Cơ sở KCB */}
+              <div style={{ border: '1px solid var(--border)', borderRadius: '8px', padding: '14px 16px' }}>
+                <div style={{ fontWeight: 700, marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Building2 size={15} color="#0284c7" />
+                  <span>2. Thông tin Cơ sở Khám chữa bệnh (Đơn vị đẩy dữ liệu)</span>
+                  <PermBadge code="PERM_SYS_PORTAL_CONFIG" />
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px' }}>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Mã CSKCB *</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={hospital.ma_cskcb}
+                      onChange={(e) => setHospital({ ...hospital, ma_cskcb: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Tên Bệnh viện / Cơ sở Y tế *</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={hospital.ten_benh_vien}
+                      onChange={(e) => setHospital({ ...hospital, ten_benh_vien: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Mã số thuế (Định danh USB Token)</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={hospital.ma_so_thue}
+                      onChange={(e) => setHospital({ ...hospital, ma_so_thue: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Địa chỉ đơn vị</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={hospital.dia_chi}
+                      onChange={(e) => setHospital({ ...hospital, dia_chi: e.target.value })}
+                    />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Tên Bệnh viện / Cơ sở Y tế *</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={hospital.ten_benh_vien}
-                  onChange={(e) => setHospital({ ...hospital, ten_benh_vien: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Mã số thuế (Định danh USB Token)</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={hospital.ma_so_thue}
-                  onChange={(e) => setHospital({ ...hospital, ma_so_thue: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Địa chỉ đơn vị</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={hospital.dia_chi}
-                  onChange={(e) => setHospital({ ...hospital, dia_chi: e.target.value })}
-                />
-              </div>
-            </div>
-          </div>
 
-          {/* 3. Cấu hình Cổng Quốc gia */}
-          <div style={{ border: '1px solid var(--border)', borderRadius: '8px', padding: '14px 16px' }}>
-            <div style={{ fontWeight: 700, marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Globe size={15} color="#0284c7" />
-              3. Cấu hình Cổng Dữ liệu Khám Sức Khỏe Quốc Gia (Bộ Y Tế EMRHub / Đề án 06)
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Môi trường tiếp nhận</label>
-                <select
-                  className="form-control"
-                  value={portal.env}
-                  onChange={(e) => setPortal({ ...portal, env: e.target.value })}
-                >
-                  <option value="sandbox">SANDBOX (Thử nghiệm)</option>
-                  <option value="prod">PRODUCTION (Chính thức)</option>
-                </select>
+              {/* 3. Cấu hình Cổng Quốc gia */}
+              <div style={{ border: '1px solid var(--border)', borderRadius: '8px', padding: '14px 16px' }}>
+                <div style={{ fontWeight: 700, marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Globe size={15} color="#0284c7" />
+                  3. Cấu hình Cổng Dữ liệu Khám Sức Khỏe Quốc Gia (Bộ Y Tế EMRHub / Đề án 06)
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Môi trường tiếp nhận</label>
+                    <select
+                      className="form-control"
+                      value={portal.env}
+                      onChange={(e) => setPortal({ ...portal, env: e.target.value })}
+                    >
+                      <option value="sandbox">SANDBOX (Thử nghiệm)</option>
+                      <option value="prod">PRODUCTION (Chính thức)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Chế độ Mô phỏng Cổng (Khi test offline)</label>
+                    <select
+                      className="form-control"
+                      value={portal.simulation_mode ? 'true' : 'false'}
+                      onChange={(e) => setPortal({ ...portal, simulation_mode: e.target.value === 'true' })}
+                    >
+                      <option value="true">Bật (Mô phỏng phản hồi Cổng BYT 200 OK)</option>
+                      <option value="false">Tắt (Gọi trực tiếp API Cổng thật)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Tài khoản Cổng BYT</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={portal.username}
+                      onChange={(e) => setPortal({ ...portal, username: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>Mật khẩu Cổng BYT (Để trống nếu giữ nguyên)</label>
+                    <input
+                      type="password"
+                      className="form-control"
+                      value={portal.password}
+                      onChange={(e) => setPortal({ ...portal, password: e.target.value })}
+                      placeholder="••••••••"
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>URL Sandbox</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={portal.sandbox_url}
+                      onChange={(e) => setPortal({ ...portal, sandbox_url: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '12px', fontWeight: 600 }}>URL Production</label>
+                    <input
+                      type="text"
+                      className="form-control"
+                      value={portal.prod_url}
+                      onChange={(e) => setPortal({ ...portal, prod_url: e.target.value })}
+                    />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Chế độ Mô phỏng Cổng (Khi test offline)</label>
-                <select
-                  className="form-control"
-                  value={portal.simulation_mode ? 'true' : 'false'}
-                  onChange={(e) => setPortal({ ...portal, simulation_mode: e.target.value === 'true' })}
-                >
-                  <option value="true">Bật (Mô phỏng phản hồi Cổng BYT 200 OK)</option>
-                  <option value="false">Tắt (Gọi trực tiếp API Cổng thật)</option>
-                </select>
-              </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Tài khoản Cổng BYT</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={portal.username}
-                  onChange={(e) => setPortal({ ...portal, username: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>Mật khẩu Cổng BYT (Để trống nếu giữ nguyên)</label>
-                <input
-                  type="password"
-                  className="form-control"
-                  value={portal.password}
-                  onChange={(e) => setPortal({ ...portal, password: e.target.value })}
-                  placeholder="••••••••"
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>URL Sandbox</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={portal.sandbox_url}
-                  onChange={(e) => setPortal({ ...portal, sandbox_url: e.target.value })}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: '12px', fontWeight: 600 }}>URL Production</label>
-                <input
-                  type="text"
-                  className="form-control"
-                  value={portal.prod_url}
-                  onChange={(e) => setPortal({ ...portal, prod_url: e.target.value })}
-                />
-              </div>
-            </div>
-          </div>
+            </>
+          )}
 
           {serverTestMsg && (
             <div style={{

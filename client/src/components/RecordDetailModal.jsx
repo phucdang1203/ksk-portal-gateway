@@ -4,6 +4,7 @@ import {
   Activity, Stethoscope, FileSignature, Award, Loader2
 } from 'lucide-react'
 import { api } from '../services/api'
+import { PermBadge } from '../utils/permissions'
 
 const FIELD_GROUPS = [
   {
@@ -86,7 +87,7 @@ const FIELD_GROUPS = [
   }
 ]
 
-export default function RecordDetailModal({ isOpen, recordId, onClose, onSaved }) {
+export default function RecordDetailModal({ isOpen, recordId, canEdit = true, onClose, onSaved }) {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [record, setRecord] = useState(null)
@@ -346,9 +347,10 @@ export default function RecordDetailModal({ isOpen, recordId, onClose, onSaved }
                                 className="form-control"
                                 style={{
                                   borderColor: hasErr ? '#ef4444' : undefined,
-                                  backgroundColor: hasErr ? '#fff1f2' : '#ffffff'
+                                  backgroundColor: !canEdit ? '#f8fafc' : hasErr ? '#fff1f2' : '#ffffff'
                                 }}
                                 value={val}
+                                disabled={!canEdit}
                                 onChange={(e) => handleFieldChange(f.key, e.target.value)}
                               >
                                 <option value="">-- Chọn --</option>
@@ -362,9 +364,10 @@ export default function RecordDetailModal({ isOpen, recordId, onClose, onSaved }
                                 className="form-control"
                                 style={{
                                   borderColor: hasErr ? '#ef4444' : undefined,
-                                  backgroundColor: hasErr ? '#fff1f2' : '#ffffff'
+                                  backgroundColor: !canEdit ? '#f8fafc' : hasErr ? '#fff1f2' : '#ffffff'
                                 }}
                                 value={val}
+                                disabled={!canEdit}
                                 onChange={(e) => handleFieldChange(f.key, e.target.value)}
                               />
                             )}
@@ -396,19 +399,22 @@ export default function RecordDetailModal({ isOpen, recordId, onClose, onSaved }
           <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
             * Mọi chỉnh sửa thông tin sẽ được kiểm tra lại tự động theo quy chuẩn Bộ Y Tế.
           </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
             <button type="button" className="btn btn-secondary" onClick={onClose}>
               Đóng
             </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={handleSave}
-              disabled={saving || loading}
-            >
-              {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-              Lưu thông tin & Kiểm tra lại
-            </button>
+            {canEdit && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleSave}
+                disabled={saving || loading}
+              >
+                {saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
+                <span>Lưu thông tin & Kiểm tra lại</span>
+                <PermBadge code="PERM_KSK_RECORD_EDIT" />
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -1,0 +1,46 @@
+# ==============================================================================
+# DOCKER COMPOSE DI DONG (PORTABLE DEPLOYMENT - KHONG CAN MA NGUON)
+# Chi can dat file nay + goi backup tren may chu moi va chay docker-restore.bat
+# ==============================================================================
+
+name: ksk-portal-gateway
+
+services:
+  ksk-gateway-server:
+    image: ksk-portal-gateway-server:latest
+    pull_policy: never
+    container_name: ksk-gateway-server
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8790}:8790"
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      - PORT=8790
+      - DATA_DIR=/app/server/data
+      - UVICORN_RELOAD=false
+      - JWT_SECRET=${JWT_SECRET:-binhan-ksk-portal-gateway-secret-key-2026}
+    volumes:
+      - ksk_gateway_data:/app/server/data
+      - ksk_gateway_releases:/app/client/dist-release
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/api/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ksk-gateway-net
+
+volumes:
+  ksk_gateway_data:
+    name: ksk_gateway_data
+  ksk_gateway_releases:
+    name: ksk_gateway_releases
+
+networks:
+  ksk-gateway-net:
+    name: ksk-gateway-net
+    driver: bridge
